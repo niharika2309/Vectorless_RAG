@@ -2,3 +2,16 @@
 __pycache__/
 *.pyc
 .env.*
+.venv/
+venv/
+.next/
+node_modules/
+dist/
+build/
+*.log
+*.tmp
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
