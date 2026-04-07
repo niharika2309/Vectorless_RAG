@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -6,9 +7,9 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import fitz
 from docx import Document
 from pydantic import BaseModel
-from pdfminer.high_level import extract_text_to_fp
 
 CHUNK_SIZE = 220
 CHUNK_OVERLAP = 40
@@ -20,6 +21,7 @@ class TreeNode(BaseModel):
     id: str
     type: str
     text: str
+    html: Optional[str] = None
     metadata: Dict[str, Any] = {}
     children: List["TreeNode"] = []
 
@@ -31,14 +33,137 @@ TreeNode.update_forward_refs()
 
 
 def normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
+    normalized = text or ""
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    lines = [line.strip() for line in normalized.split("\n")]
+    normalized = "\n".join(lines)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def convert_text_to_markdown(text: str) -> str:
+    if not text:
+        return ""
+
+    lines = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            lines.append("")
+            continue
+
+        if re.match(r"^ITEM\s+\d+[A-Za-z0-9\.]*", line, flags=re.I):
+            lines.append(f"## {line}")
+            continue
+
+        if re.match(r"^[A-Z0-9][A-Z0-9\s\-\&\(\)]+$", line) and len(line.split()) <= 10:
+            lines.append(f"## {line}")
+            continue
+
+        lines.append(line)
+
+    markdown = "\n".join(lines)
+    markdown = re.sub(r"\n{3,}", "\n\n", markdown)
+    return markdown.strip()
+
+
+def save_markdown_export(filename: str, markdown_text: str) -> str:
+    export_dir = Path.cwd() / "markdown_exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    base_name = Path(filename).stem
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", base_name)
+    output_file = export_dir / f"{safe_name}.md"
+
+    if output_file.exists():
+        output_file = export_dir / f"{safe_name}-{uuid.uuid4().hex[:8]}.md"
+
+    output_file.write_text(markdown_text, encoding="utf-8")
+    return str(output_file.relative_to(Path.cwd()))
+
+
+def split_markdown_sections(markdown: str) -> List[Dict[str, str]]:
+    sections: List[Dict[str, str]] = []
+    current_title = None
+    current_lines: List[str] = []
+
+    for line in markdown.split("\n"):
+        heading_match = re.match(r"^#{1,6}\s+(.*)$", line)
+        if heading_match:
+            if current_title is not None:
+                sections.append({
+                    "title": current_title,
+                    "content": "\n".join(current_lines).strip(),
+                })
+            current_title = heading_match.group(1).strip()
+            current_lines = []
+            continue
+
+        current_lines.append(line)
+
+    if current_title is not None:
+        sections.append({
+            "title": current_title,
+            "content": "\n".join(current_lines).strip(),
+        })
+    elif current_lines:
+        sections.append({"title": "Document", "content": "\n".join(current_lines).strip()})
+
+    return sections
+
+
+def split_text_into_paragraphs(text: str) -> List[str]:
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n{2,}", text) if paragraph.strip()]
+    chunks: List[str] = []
+    for paragraph in paragraphs:
+        if len(re.findall(r"\S+", paragraph)) <= CHUNK_SIZE:
+            chunks.append(paragraph)
+        else:
+            chunks.extend(chunk_text(paragraph))
+    return chunks
+
+
+def text_to_html(text: str) -> str:
+    escaped = html.escape(text or "")
+    lines = escaped.split("\n")
+    paragraphs: List[str] = []
+    buffer: List[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if buffer:
+                paragraphs.append(" ".join(buffer))
+                buffer = []
+            continue
+
+        if re.match(r"^(ITEM\s+\d+[A-Za-z0-9\.]*)[:\.]?", stripped, flags=re.I):
+            if buffer:
+                paragraphs.append(" ".join(buffer))
+                buffer = []
+            paragraphs.append(f"<strong>{stripped}</strong>")
+            continue
+
+        buffer.append(stripped)
+
+    if buffer:
+        paragraphs.append(" ".join(buffer))
+
+    html_lines = []
+    for paragraph in paragraphs:
+        if paragraph.startswith("<strong>"):
+            html_lines.append(f"<h3>{paragraph}</h3>")
+        else:
+            html_lines.append(f"<p>{paragraph}</p>")
+
+    return "".join(html_lines) or "<pre class=\"whitespace-pre-wrap\">No preview available.</pre>"
 
 
 def extract_text_from_pdf(raw_bytes: bytes) -> str:
-    output = StringIO()
-    with BytesIO(raw_bytes) as fp:
-        extract_text_to_fp(fp, output)
-    return output.getvalue()
+    with fitz.open(stream=raw_bytes, filetype="pdf") as doc:
+        pages = [page.get_text("text") for page in doc]
+    return "\n\n".join(pages)
 
 
 def extract_text_from_docx(raw_bytes: bytes) -> str:
@@ -91,19 +216,25 @@ def build_document_tree(documents: List[Dict[str, Any]]) -> TreeNode:
         text = extract_document_text(filename, raw_bytes)
         doc_id = str(uuid.uuid4())
 
-        section_data = extract_document_structure(filename, text)
+        markdown_text = convert_text_to_markdown(text)
+        section_data = split_markdown_sections(markdown_text)
+        if not section_data:
+            section_data = extract_document_structure(filename, markdown_text)
+
         section_nodes: List[TreeNode] = []
 
         if section_data:
             for section_index, section in enumerate(section_data):
-                children = []
                 section_text = normalize_text(section.get("content", ""))
-                for chunk_index, chunk in enumerate(chunk_text(section_text)):
+                section_html = text_to_html(section_text)
+                children = []
+                for chunk_index, chunk in enumerate(split_text_into_paragraphs(section_text)):
                     children.append(
                         TreeNode(
                             id=f"{doc_id}-section-{section_index}-chunk-{chunk_index}",
                             type="chunk",
                             text=chunk,
+                            html=text_to_html(chunk),
                             metadata={
                                 "filename": filename,
                                 "documentId": doc_id,
@@ -117,6 +248,7 @@ def build_document_tree(documents: List[Dict[str, Any]]) -> TreeNode:
                         id=f"{doc_id}-section-{section_index}",
                         type="section",
                         text="\n\n".join(child.text for child in children),
+                        html=section_html,
                         metadata={
                             "filename": filename,
                             "documentId": doc_id,
@@ -126,34 +258,36 @@ def build_document_tree(documents: List[Dict[str, Any]]) -> TreeNode:
                     )
                 )
         else:
-            chunk_nodes: List[TreeNode] = []
-            for index, chunk in enumerate(chunk_text(text)):
-                chunk_nodes.append(
+            paragraph_texts = split_text_into_paragraphs(text)
+            children = []
+            for index, paragraph in enumerate(paragraph_texts):
+                children.append(
                     TreeNode(
                         id=f"{doc_id}-chunk-{index}",
                         type="chunk",
-                        text=chunk,
+                        text=paragraph,
+                        html=text_to_html(paragraph),
                         metadata={"filename": filename, "documentId": doc_id},
                     )
                 )
 
-            for section_index in range(0, len(chunk_nodes), SECTION_SIZE):
-                children = chunk_nodes[section_index : section_index + SECTION_SIZE]
-                section_nodes.append(
-                    TreeNode(
-                        id=f"{doc_id}-section-{section_index // SECTION_SIZE}",
-                        type="section",
-                        text="\n\n".join(child.text for child in children),
-                        metadata={"filename": filename, "documentId": doc_id},
-                        children=children,
-                    )
+            section_nodes.append(
+                TreeNode(
+                    id=f"{doc_id}-section-0",
+                    type="section",
+                    text="\n\n".join(child.text for child in children),
+                    html=text_to_html("\n\n".join(child.text for child in children)),
+                    metadata={"filename": filename, "documentId": doc_id},
+                    children=children,
                 )
+            )
 
         root_children.append(
             TreeNode(
                 id=doc_id,
                 type="document",
                 text=text,
+                html=text_to_html(text),
                 metadata={"filename": filename},
                 children=section_nodes,
             )
@@ -164,6 +298,93 @@ def build_document_tree(documents: List[Dict[str, Any]]) -> TreeNode:
 
 # Backward compatibility for legacy imports.
 build_tree = build_document_tree
+
+
+def serialize_tree(node: TreeNode) -> Dict[str, Any]:
+    children = [child for child in node.children if child.type != "chunk"]
+    return {
+        "id": node.id,
+        "type": node.type,
+        "label": node.metadata.get("sectionTitle") or node.metadata.get("filename") or node.type,
+        "summary": (node.text or "")[:180],
+        "html": node.html,
+        "metadata": node.metadata,
+        "children": [serialize_tree(child) for child in children],
+    }
+
+
+def find_node_by_id(node: TreeNode, node_id: str) -> Optional[TreeNode]:
+    if node.id == node_id:
+        return node
+    for child in node.children:
+        found = find_node_by_id(child, node_id)
+        if found:
+            return found
+    return None
+
+
+def get_path_to_node(node: TreeNode, node_id: str) -> List[TreeNode]:
+    if node.id == node_id:
+        return [node]
+    for child in node.children:
+        path = get_path_to_node(child, node_id)
+        if path:
+            return [node] + path
+    return []
+
+
+def build_reasoning_trace(query: str, root: TreeNode, source_node_ids: List[str]) -> List[str]:
+    trace: List[str] = [f"Query: {query}"]
+    if not source_node_ids:
+        trace.append("No relevant nodes were identified.")
+        return trace
+
+    first_node = find_node_by_id(root, source_node_ids[0])
+    if first_node is None:
+        trace.append("Selected a search path but could not load node metadata.")
+        return trace
+
+    path = get_path_to_node(root, first_node.id)
+    if len(path) > 1:
+        doc_title = path[1].metadata.get("filename", "document")
+        trace.append(f"Navigating to document: {doc_title}")
+    if len(path) > 2:
+        section_title = path[2].metadata.get("sectionTitle") or path[2].type
+        trace.append(f"Exploring section: {section_title}")
+    trace.append(f"Extracting content from node {first_node.id}.")
+    trace.append(f"Chose {len(source_node_ids)} nodes along the reasoning path.")
+    return trace
+
+
+def compute_structural_score(query: str, root: TreeNode, source_node_ids: List[str]) -> int:
+    title_scores: List[int] = []
+    query_terms = set(re.findall(r"\w+", query.lower()))
+
+    for node_id in source_node_ids:
+        node = find_node_by_id(root, node_id)
+        if not node or node.type not in {"section", "document"}:
+            continue
+        title = str(node.metadata.get("sectionTitle") or node.metadata.get("filename") or "")
+        title_terms = set(re.findall(r"\w+", title.lower()))
+        title_scores.append(len(query_terms & title_terms))
+
+    if not title_scores:
+        return 40
+
+    avg_match = sum(title_scores) / len(title_scores)
+    return min(100, max(30, int(40 + avg_match * 15)))
+
+
+def get_best_source_node(root: TreeNode, source_node_ids: List[str]) -> Optional[TreeNode]:
+    for node_id in source_node_ids:
+        node = find_node_by_id(root, node_id)
+        if node and node.type in {"section", "document"}:
+            return node
+    for node_id in source_node_ids:
+        node = find_node_by_id(root, node_id)
+        if node:
+            return node
+    return None
 
 
 def score_text(query: str, text: str) -> int:
@@ -215,14 +436,18 @@ def retrieve_tree(query: str, root: TreeNode, top_k: int = TOP_K) -> Tuple[List[
 
 def extract_document_structure(filename: str, text: str, model: str = "gemma4:latest") -> List[Dict[str, str]]:
     structure_prompt = (
-        "Parse the document into a JSON array of sections. "
-        "Each section object must contain a title and content. "
-        "Return only valid JSON, with no extra explanation. "
-        "Use the document title when possible.\n\n"
+        "The input is markdown-like text. Parse it into a JSON array of sections using the document headings. "
+        "Each section object must contain exactly two fields: title and content. "
+        "Do not nest any content under the wrong heading, and make sure every word in the document appears in exactly one section. "
+        "Preserve the original section headings, especially any 'ITEM' headings from a 10-K. "
+        "Return only valid JSON with no additional explanation or formatting.\n\n"
         f"Document title: {filename}\n\n"
         f"Document text:\n{text[:12000]}"
     )
-    response = generate_answer_ollama(structure_prompt, model=model)
+    try:
+        response = generate_answer_ollama(structure_prompt, model=model)
+    except Exception:
+        return auto_extract_structure_from_text(text)
 
     try:
         parsed = json.loads(response)
@@ -263,7 +488,23 @@ def extract_document_structure(filename: str, text: str, model: str = "gemma4:la
             if isinstance(section, dict)
         ]
 
-    return []
+    fallback = auto_extract_structure_from_text(text)
+    return fallback
+
+
+def auto_extract_structure_from_text(text: str) -> List[Dict[str, str]]:
+    pattern = re.compile(
+        r"(ITEM\s+\d+[A-Za-z0-9\.]*[:\.]?\s*[^\n]+)\s*(.*?)" 
+        r"(?=ITEM\s+\d+[A-Za-z0-9\.]*[:\.]?\s*[^\n]+|\Z)",
+        flags=re.I | re.S,
+    )
+    sections: List[Dict[str, str]] = []
+    for match in pattern.finditer(text):
+        title = match.group(1).strip()
+        content = match.group(2).strip()
+        if title and content:
+            sections.append({"title": title, "content": content})
+    return sections
 
 
 def build_prompt(query: str, chunks: List[Tuple[str, str]]) -> str:
@@ -292,11 +533,13 @@ def generate_answer_ollama(prompt: str, model: str = "gemma4:latest") -> str:
     if load_dotenv is not None:
         load_dotenv()
 
-    from urllib import error, request
     import json
+    import socket
+    from urllib import error, request
 
     api_url = os.environ.get("OLLAMA_API_URL", "http://127.0.0.1:11434")
     api_key = os.environ.get("OLLAMA_API_KEY")
+    timeout_seconds = int(os.environ.get("OLLAMA_TIMEOUT", "120"))
 
     payload = {
         "model": model,
@@ -328,13 +571,18 @@ def generate_answer_ollama(prompt: str, model: str = "gemma4:latest") -> str:
     )
 
     try:
-        with request.urlopen(request_obj, timeout=60) as response:
+        with request.urlopen(request_obj, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
     except error.HTTPError as exc:
         payload = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Ollama error {exc.code}: {payload}") from exc
     except error.URLError as exc:
         raise RuntimeError(f"Ollama request failed: {exc}") from exc
+    except socket.timeout as exc:
+        raise RuntimeError(
+            f"Ollama request timed out after {timeout_seconds} seconds. "
+            "Check that the Ollama server is running and reachable, or increase OLLAMA_TIMEOUT."
+        ) from exc
 
     def parse_json_objects(text: str) -> List[Dict[str, Any]]:
         objects: List[Dict[str, Any]] = []
@@ -388,14 +636,20 @@ def generate_answer_ollama(prompt: str, model: str = "gemma4:latest") -> str:
     raise RuntimeError(f"Unexpected Ollama response format: {objects}")
 
 
-def query_tree(query: str, root: TreeNode, model: str = "gemma4:latest") -> Tuple[str, List[str]]:
+def query_tree(query: str, root: TreeNode, model: str = "gemma4:latest") -> Tuple[str, List[str], List[str], int, str, str, str]:
     top_chunks, source_node_ids = retrieve_tree(query, root)
     if not top_chunks:
-        return "I don't know.", []
+        return "I don't know.", [], ["No context was retrieved from the document tree."], 0, "", "", ""
 
     prompt = build_prompt(query, top_chunks)
     answer = generate_answer_ollama(prompt, model=model)
-    return answer, source_node_ids
+    reasoning = build_reasoning_trace(query, root, source_node_ids)
+    confidence = compute_structural_score(query, root, source_node_ids)
+    source_node = get_best_source_node(root, source_node_ids)
+    source_html = source_node.html if source_node and source_node.html else text_to_html(source_node.text if source_node else "")
+    source_title = source_node.metadata.get("sectionTitle") or source_node.metadata.get("filename") or "Source"
+    source_node_id = source_node.id if source_node else ""
+    return answer, source_node_ids, reasoning, confidence, source_html, source_node_id, source_title
 
 
 def format_node_label(node: TreeNode) -> str:
@@ -425,7 +679,9 @@ def flatten_tree_to_react_flow(root: TreeNode) -> Dict[str, List[Dict[str, Any]]
                 "data": {
                     "label": format_node_label(node),
                     "text": node.text,
+                    "html": node.html,
                     "metadata": node.metadata,
+                    "nodeType": node.type,
                 },
                 "position": {"x": 0, "y": 0},
             }

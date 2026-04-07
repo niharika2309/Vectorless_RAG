@@ -1,8 +1,8 @@
-# Vectorless RAG
+# The Structural Auditor
 
-Vectorless RAG is a retrieval-augmented generation approach that avoids a dedicated vector database or embedding index. Instead, it relies on local document structure, text chunking, and simple relevance scoring to retrieve supporting content before generation.
+The Structural Auditor is a document reasoning prototype that shows exactly how the AI navigates a 10-K's structure to answer questions. It replaces a simple retrieval chat box with a tree-based audit trail, a reasoning log, and an original source preview.
 
-The key idea is to keep the pipeline lightweight and transparent: documents are parsed, broken into sections and chunks, and ranked by keyword overlap with the query. The model is then asked to generate an answer using only the retrieved context.
+The key idea is to keep the pipeline lightweight and transparent: documents are parsed into a tree of sections and chunks, the system navigates the tree by keyword relevance, and the answer is generated from only the selected content while exposing the structural reasoning path.
 
 ## What this project does
 

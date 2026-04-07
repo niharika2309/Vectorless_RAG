@@ -8,9 +8,12 @@ interface RAGVisualizerProps {
   nodes: Node[];
   edges: Edge[];
   sourceNodeIds: string[];
+  onNodeHover?: (node: Node) => void;
+  onNodeLeave?: () => void;
+  onNodeClick?: (node: Node) => void;
 }
 
-export default function RAGVisualizer({ nodes, edges, sourceNodeIds }: RAGVisualizerProps) {
+export default function RAGVisualizer({ nodes, edges, sourceNodeIds, onNodeHover, onNodeLeave, onNodeClick }: RAGVisualizerProps) {
   const [rfNodes, setNodes, onNodesChange] = useNodesState(nodes);
   const [rfEdges, setEdges, onEdgesChange] = useEdgesState(edges);
 
@@ -53,7 +56,16 @@ export default function RAGVisualizer({ nodes, edges, sourceNodeIds }: RAGVisual
 
   return (
     <div className="h-full w-full rounded-3xl bg-white">
-      <ReactFlow nodes={rfNodes} edges={rfEdges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} fitView>
+      <ReactFlow
+        nodes={rfNodes}
+        edges={rfEdges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onNodeMouseEnter={(_, node) => onNodeHover?.(node)}
+        onNodeMouseLeave={() => onNodeLeave?.()}
+        onNodeClick={(_, node) => onNodeClick?.(node)}
+        fitView
+      >
         <Background gap={16} size={1} />
         <Controls showInteractive={false} />
       </ReactFlow>
