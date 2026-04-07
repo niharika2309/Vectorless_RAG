@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import ReactFlow, { Background, Controls, Node, Edge, useEdgesState, useNodesState } from 'reactflow';
 import 'reactflow/dist/style.css';
 
@@ -16,6 +16,8 @@ interface RAGVisualizerProps {
 export default function RAGVisualizer({ nodes, edges, sourceNodeIds, onNodeHover, onNodeLeave, onNodeClick }: RAGVisualizerProps) {
   const [rfNodes, setNodes, onNodesChange] = useNodesState(nodes);
   const [rfEdges, setEdges, onEdgesChange] = useEdgesState(edges);
+  const [hoveredNode, setHoveredNode] = useState<Node | null>(null);
+  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
 
   useEffect(() => {
     setNodes(nodes);
@@ -52,21 +54,45 @@ export default function RAGVisualizer({ nodes, edges, sourceNodeIds, onNodeHover
           : { stroke: '#94a3b8', strokeWidth: 1 },
       }))
     );
-  }, [sourceNodeIds, setEdges, setNodes]);
+  const handleNodeMouseEnter = (event: React.MouseEvent, node: Node) => {
+    setHoveredNode(node);
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    setTooltipPosition({ x: rect.left, y: rect.top });
+    onNodeHover?.(node);
+  };
+
+  const handleNodeMouseLeave = () => {
+    setHoveredNode(null);
+    onNodeLeave?.();
+  };
 
   return (
-    <div className="h-full w-full rounded-3xl bg-white">
+    <div className="h-full w-full rounded-3xl bg-white relative">
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        onNodeMouseEnter={(_, node) => onNodeHover?.(node)}
-        onNodeMouseLeave={() => onNodeLeave?.()}
+        onNodeMouseEnter={handleNodeMouseEnter}
+        onNodeMouseLeave={handleNodeMouseLeave}
         onNodeClick={(_, node) => onNodeClick?.(node)}
         fitView
       >
         <Background gap={16} size={1} />
+        <Controls showInteractive={false} />
+      </ReactFlow>
+      
+      {hoveredNode && hoveredNode.data?.text && (
+        <div className="fixed z-50 max-w-sm rounded-lg border border-slate-300 bg-white p-3 shadow-lg pointer-events-none" 
+             style={{
+               left: `${tooltipPosition.x + 10}px`,
+               top: `${tooltipPosition.y - 10}px`,
+             }}>
+          <p className="text-xs leading-relaxed text-slate-700 max-h-64 overflow-y-auto">
+            {hoveredNode.data.text}
+          </p>
+        </div>
+      )}d gap={16} size={1} />
         <Controls showInteractive={false} />
       </ReactFlow>
     </div>

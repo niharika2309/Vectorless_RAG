@@ -44,6 +44,12 @@ export function layoutTree(nodes: Node[], edges: Edge[]): FlowGraph {
     levels.set(level, [...(levels.get(level) || []), node]);
   });
 
+  // Calculate node dimensions
+  const nodeWidth = 280;
+  const nodeHeight = 100;
+  const horizontalSpacing = 80;
+  const verticalSpacing = 40;
+
   const positioned = nodes.map((node) => {
     const level = depth.get(node.id) ?? 0;
     const column = levels.get(level) || [];
@@ -51,12 +57,22 @@ export function layoutTree(nodes: Node[], edges: Edge[]): FlowGraph {
     return {
       ...node,
       position: {
-        x: level * 320,
-        y: index * 120,
+        x: level * (nodeWidth + horizontalSpacing),
+        y: index * (nodeHeight + verticalSpacing),
       },
       data: {
         ...node.data,
         label: node.data?.label ?? node.id,
+      },
+      style: {
+        width: `${nodeWidth}px`,
+        height: `${nodeHeight}px`,
+        padding: '12px',
+        fontSize: '12px',
+        lineHeight: '1.4',
+        wordWrap: 'break-word',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
       },
       sourcePosition: 'right',
       targetPosition: 'left',
