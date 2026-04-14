@@ -37,7 +37,7 @@ class UploadResponse(BaseModel):
 class QueryRequest(BaseModel):
     sessionId: str
     query: str
-    model: str = "gemma4:latest"
+    model: str = "gemma-e4b"
 
 
 class QueryResponse(BaseModel):

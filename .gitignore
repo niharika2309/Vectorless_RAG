@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env.*
+!.env.example
 .venv/
 venv/
 .next/
@@ -15,3 +16,6 @@ build/
 .vscode/
 *.swp
 *.swo
+.pytest_cache/
+frontend/.next/
+markdown_exports/

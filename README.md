@@ -7,18 +7,18 @@ The key idea is to keep the pipeline lightweight and transparent: documents are 
 ## What this project does
 
 - Accepts PDF, DOCX, and TXT uploads.
-- Converts documents into plain text and uses Gemma4 to extract section structure when available.
+- Converts documents into plain text and uses Gemma E4B to extract section structure when available.
 - Builds a hierarchical tree: `Root → Document → Section → Chunk`.
 - Flattens the tree into a React Flow graph for visualization.
 - Stores the parsed tree in session memory so queries reuse the upload state.
-- Retrieves the most relevant chunks for a question and generates a grounded answer with `gemma4:latest`.
+- Retrieves the most relevant chunks for a question and generates a grounded answer via LM Studio (`gemma-e4b`).
 
 ## Architecture
 
 ### Backend
 
 - `main.py` — FastAPI server with `/upload` and `/query` endpoints.
-- `rag.py` — document ingestion, chunking, retrieval, tree building, and Ollama integration.
+- `rag.py` — document ingestion, chunking, retrieval, tree building, and LM Studio (OpenAI-compatible) integration.
 - Uploads are stored in a session object in `app.state.sessions`.
 - The backend returns `sourceNodeIds` so the frontend can highlight the retrieval path.
 
@@ -30,15 +30,36 @@ The key idea is to keep the pipeline lightweight and transparent: documents are 
 
 ## Run the app
 
-### Backend
+### Prerequisites
+
+- [uv](https://docs.astral.sh/uv/) — Python package/project manager
+- [Node.js](https://nodejs.org/) 18+
+- [LM Studio](https://lmstudio.ai/) with **Gemma E4B** loaded and the local server running on `http://127.0.0.1:1234`
+
+### 1. Python environment (uv)
 
 ```bash
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-python3 -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create a virtual environment and install dependencies
+uv venv
+uv pip install -r requirements.txt
 ```
 
-### Frontend
+### 2. Backend
+
+```bash
+# Activate the virtual environment
+source .venv/bin/activate
+
+# Start the FastAPI server
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+The API will be available at `http://127.0.0.1:8000`.
+
+### 3. Frontend
 
 ```bash
 cd frontend
@@ -46,24 +67,19 @@ npm install
 npm run dev
 ```
 
-Then open:
-
-```bash
-http://localhost:3000
-```
+Then open `http://localhost:3000`.
 
 ## Configuration
 
-This repo includes `.env.example` for optional Ollama settings.
-
-Create a `.env` file if you need a custom Ollama host:
+Optional — create a `.env` file in the project root to override defaults:
 
 ```env
-OLLAMA_API_URL=http://127.0.0.1:11434
-# OLLAMA_API_KEY=your_api_key
+LLM_API_URL=http://127.0.0.1:1234
+# LLM_API_KEY=lm-studio
+# LLM_TIMEOUT=120
 ```
 
-If Ollama is running locally on the default URL, no `.env` file is required.
+If LM Studio is running on the default address no `.env` file is needed.
 
 ## How it works
 
@@ -72,8 +88,8 @@ If Ollama is running locally on the default URL, no `.env` file is required.
 3. The backend builds a hierarchical tree and returns a React Flow graph.
 4. The frontend renders the tree and displays upload status.
 5. User submits a question against the current session.
-6. Backend retrieves the most relevant chunks and sends them to Ollama.
-7. Ollama returns a grounded answer, and the frontend highlights the source node ids.
+6. Backend retrieves the most relevant chunks and sends them to LM Studio.
+7. LM Studio returns a grounded answer, and the frontend highlights the source node ids.
 
 ## Notes
 

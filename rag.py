@@ -2,7 +2,7 @@
 rag.py  —  Vectorless RAG backend
 Chunking strategy: LLM-driven semantic chunking only.
   • Text is converted to markdown (heading heuristics for PDFs/TXT).
-  • The LLM (Gemma4) decides which paragraphs belong together as a chunk.
+  • The LLM (Gemma E4B via LM Studio) decides which paragraphs belong together as a chunk.
   • There is NO fixed-size word-count chunking; the LLM owns all boundaries.
   • The only fallback (if the LLM call hard-fails) splits on blank lines (paragraph boundaries),
     which is still structure-aware, not size-aware.
@@ -158,7 +158,7 @@ def llm_chunk_section(
     section_title: str,
     section_text: str,
     filename: str,
-    model: str = "gemma4:latest",
+    model: str = "gemma-e4b",
 ) -> List[str]:
     """
     Ask the LLM to split a section's text into semantically coherent chunks.
@@ -178,7 +178,7 @@ def llm_chunk_section(
     )
 
     try:
-        raw = generate_answer_ollama(prompt, model=model)
+        raw = generate_answer(prompt, model=model)
     except Exception:
         return _paragraph_fallback(section_text)
 
@@ -244,7 +244,7 @@ def split_markdown_sections(markdown: str) -> List[Dict[str, str]]:
 
 
 def extract_document_structure(
-    filename: str, text: str, model: str = "gemma4:latest"
+    filename: str, text: str, model: str = "gemma-e4b"
 ) -> List[Dict[str, str]]:
     """LLM-driven section extraction from free-form text."""
     structure_prompt = (
@@ -257,7 +257,7 @@ def extract_document_structure(
     )
 
     try:
-        response = generate_answer_ollama(structure_prompt, model=model)
+        response = generate_answer(structure_prompt, model=model)
     except Exception:
         return auto_extract_structure_from_text(text)
 
@@ -311,7 +311,7 @@ def auto_extract_structure_from_text(text: str) -> List[Dict[str, str]]:
 
 # ── tree builder ───────────────────────────────────────────────────────────────
 def build_document_tree(
-    documents: List[Dict[str, Any]], model: str = "gemma4:latest"
+    documents: List[Dict[str, Any]], model: str = "gemma-e4b"
 ) -> TreeNode:
     root_children: List[TreeNode] = []
 
@@ -562,7 +562,8 @@ def build_prompt(query: str, chunks: List[Tuple[str, str]]) -> str:
     )
 
 
-def generate_answer_ollama(prompt: str, model: str = "gemma4:latest") -> str:
+def generate_answer(prompt: str, model: str = "gemma-e4b") -> str:
+    """Call the local LM Studio server (OpenAI-compatible API) to generate an answer."""
     try:
         from dotenv import load_dotenv
     except ImportError:
@@ -573,9 +574,9 @@ def generate_answer_ollama(prompt: str, model: str = "gemma4:latest") -> str:
     import socket
     from urllib import error, request as urllib_request
 
-    api_url = os.environ.get("OLLAMA_API_URL", "http://127.0.0.1:11434")
-    api_key = os.environ.get("OLLAMA_API_KEY")
-    timeout_seconds = int(os.environ.get("OLLAMA_TIMEOUT", "120"))
+    api_url = os.environ.get("LLM_API_URL", "http://127.0.0.1:1234")
+    api_key = os.environ.get("LLM_API_KEY", "lm-studio")
+    timeout_seconds = int(os.environ.get("LLM_TIMEOUT", "120"))
 
     payload = {
         "model": model,
@@ -600,7 +601,7 @@ def generate_answer_ollama(prompt: str, model: str = "gemma4:latest") -> str:
         headers["Authorization"] = f"Bearer {api_key}"
 
     request_obj = urllib_request.Request(
-        f"{api_url.rstrip('/')}/api/chat",
+        f"{api_url.rstrip('/')}/v1/chat/completions",
         data=body,
         headers=headers,
         method="POST",
@@ -611,68 +612,78 @@ def generate_answer_ollama(prompt: str, model: str = "gemma4:latest") -> str:
             raw = response.read().decode("utf-8")
     except error.HTTPError as exc:
         payload_text = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Ollama error {exc.code}: {payload_text}") from exc
+        raise RuntimeError(f"LLM API error {exc.code}: {payload_text}") from exc
     except error.URLError as exc:
-        raise RuntimeError(f"Ollama request failed: {exc}") from exc
+        raise RuntimeError(f"LLM API request failed: {exc}") from exc
     except socket.timeout as exc:
         raise RuntimeError(
-            f"Ollama request timed out after {timeout_seconds}s. "
-            "Check that the Ollama server is running, or increase OLLAMA_TIMEOUT."
+            f"LLM API request timed out after {timeout_seconds}s. "
+            "Check that LM Studio is running, or increase LLM_TIMEOUT."
         ) from exc
-
-    def parse_json_objects(text: str) -> List[Dict[str, Any]]:
-        objects: List[Dict[str, Any]] = []
-        decoder = json.JSONDecoder()
-        offset = 0
-        text = text.lstrip()
-        while offset < len(text):
-            try:
-                obj, end = decoder.raw_decode(text, offset)
-            except json.JSONDecodeError:
-                break
-            if isinstance(obj, dict):
-                objects.append(obj)
-            offset = end
-            while offset < len(text) and text[offset] in "\r\n \t":
-                offset += 1
-        return objects
 
     try:
         response_json = json.loads(raw)
-        objects: List[Dict[str, Any]] = [response_json] if isinstance(response_json, dict) else []
-    except json.JSONDecodeError:
-        objects = parse_json_objects(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON response from LLM API: {raw[:200]}") from exc
 
-    assistant_parts: List[str] = []
-    for obj in objects:
-        if isinstance(obj.get("message"), dict):
-            content = obj["message"].get("content")
-            if isinstance(content, str) and content:
-                assistant_parts.append(content)
-        elif "response" in obj:
-            assistant_parts.append(str(obj["response"]))
-        elif "output" in obj:
-            output = obj["output"]
-            if isinstance(output, list) and output:
-                assistant_parts.append(str(output[0]))
-        elif "text" in obj and isinstance(obj["text"], str):
-            assistant_parts.append(obj["text"])
+    # OpenAI-compatible response parsing with LM Studio tolerance.
+    choices = response_json.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        choice = choices[0]
 
-    answer = "".join(assistant_parts).strip()
-    if answer:
-        return answer
+        # Non-streaming: choices[0].message.content
+        message = choice.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            if isinstance(content, list):
+                parts: List[str] = []
+                for item in content:
+                    if isinstance(item, str):
+                        if item.strip():
+                            parts.append(item.strip())
+                    elif isinstance(item, dict):
+                        text = item.get("text")
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text.strip())
+                if parts:
+                    return "\n".join(parts)
 
-    if objects:
-        last = objects[-1]
-        if isinstance(last.get("message"), dict):
-            return str(last["message"].get("content", "")).strip()
+            # Some reasoning-enabled models return this field.
+            reasoning = message.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning.strip():
+                return reasoning.strip()
 
-    raise RuntimeError(f"Unexpected Ollama response format: {objects}")
+        # Streaming-like variant: choices[0].delta.content
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            delta_content = delta.get("content")
+            if isinstance(delta_content, str) and delta_content.strip():
+                return delta_content.strip()
+
+        # Legacy/alternate variant: choices[0].text
+        text = choice.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    # Some local servers return a direct response/content field.
+    fallback_response = response_json.get("response")
+    if isinstance(fallback_response, str) and fallback_response.strip():
+        return fallback_response.strip()
+    fallback_content = response_json.get("content")
+    if isinstance(fallback_content, str) and fallback_content.strip():
+        return fallback_content.strip()
+
+    raise RuntimeError(
+        "Unexpected LLM API response format. "
+        f"Top-level keys: {sorted(list(response_json.keys()))}"
+    )
 
 
 # ── query entrypoint ───────────────────────────────────────────────────────────
 def query_tree(
-    query: str, root: TreeNode, model: str = "gemma4:latest"
+    query: str, root: TreeNode, model: str = "gemma-e4b"
 ) -> Tuple[str, List[str], List[str], int, str, str, str]:
     top_chunks, source_node_ids = retrieve_tree(query, root)
 
@@ -685,7 +696,7 @@ def query_tree(
         )
 
     prompt = build_prompt(query, top_chunks)
-    answer = generate_answer_ollama(prompt, model=model)
+    answer = generate_answer(prompt, model=model)
     reasoning = build_reasoning_trace(query, root, source_node_ids)
     confidence = compute_structural_score(query, root, source_node_ids)
     source_node = get_best_source_node(root, source_node_ids)
