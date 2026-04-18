@@ -4,7 +4,22 @@
 
 A document reasoning system that answers questions over uploaded files **without a vector database**. Instead of embedding-based similarity search, it uses an LLM to semantically chunk documents into a hierarchical tree and navigates that tree structurally to retrieve and answer.
 
+
 ---
+
+## How Vectorless RAG Works
+
+![Vectorless RAG Flow](image.png)
+
+1. Upload a PDF, DOCX, or TXT file in the Streamlit UI.
+2. The backend extracts plain text and normalizes formatting.
+3. The document is split into sections using heading heuristics, with an LLM fallback for unstructured documents.
+4. Each section is chunked semantically by the LLM instead of using fixed token windows.
+5. The system builds a tree: `Root -> Document -> Section -> Chunk`.
+6. At query time, it retrieves the most relevant chunks by structural keyword overlap rather than vector similarity.
+7. Those chunks are passed to the answer model, which returns a grounded response with source attribution and confidence.
+
+This approach avoids embedding generation and vector index maintenance while still preserving document structure and explainability.
 
 ## System Architecture
 
@@ -155,7 +170,6 @@ A document reasoning system that answers questions over uploaded files **without
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
 # Also install Streamlit (system-level, outside venv)
 pip3 install streamlit
 ```
@@ -174,7 +188,6 @@ This launches the FastAPI backend on `http://127.0.0.1:8000` and the Streamlit U
 # Terminal 1 — backend
 source .venv/bin/activate
 uvicorn main:app --host 127.0.0.1 --port 8000
-
 # Terminal 2 — frontend
 streamlit run streamlit_app.py --server.port 8501
 ```
