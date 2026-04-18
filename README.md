@@ -1,3 +1,5 @@
+[![Watch Demo](https://img.shields.io/badge/Watch-Demo%20Video-red?logo=youtube)](https://youtu.be/6UDFz4MkD54)
+
 # Vectorless RAG
 
 A document reasoning system that answers questions over uploaded files **without a vector database**. Instead of embedding-based similarity search, it uses an LLM to semantically chunk documents into a hierarchical tree and navigates that tree structurally to retrieve and answer.
