@@ -626,6 +626,20 @@ def generate_answer(prompt: str, model: str = "gemma-e4b") -> str:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Invalid JSON response from LLM API: {raw[:200]}") from exc
 
+    def _strip_think_tags(text: str) -> str:
+        """Remove <think>...</think> blocks; if content follows, return that. Otherwise return text as-is."""
+        # Split on closing tag; anything after </think> is the final answer
+        parts = re.split(r"</think>", text, flags=re.IGNORECASE)
+        if len(parts) > 1:
+            after = parts[-1].strip()
+            if after:
+                return after
+        # Also remove any unclosed leading <think> block if the whole text is wrapped in it
+        cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+        if cleaned:
+            return cleaned
+        return text.strip()
+
     # OpenAI-compatible response parsing with LM Studio tolerance.
     choices = response_json.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
@@ -636,7 +650,7 @@ def generate_answer(prompt: str, model: str = "gemma-e4b") -> str:
         if isinstance(message, dict):
             content = message.get("content")
             if isinstance(content, str) and content.strip():
-                return content.strip()
+                return _strip_think_tags(content.strip())
             if isinstance(content, list):
                 parts: List[str] = []
                 for item in content:
@@ -648,12 +662,22 @@ def generate_answer(prompt: str, model: str = "gemma-e4b") -> str:
                         if isinstance(text, str) and text.strip():
                             parts.append(text.strip())
                 if parts:
-                    return "\n".join(parts)
+                    return _strip_think_tags("\n".join(parts))
 
-            # Some reasoning-enabled models return this field.
-            reasoning = message.get("reasoning_content")
-            if isinstance(reasoning, str) and reasoning.strip():
-                return reasoning.strip()
+            # reasoning_content is the internal chain-of-thought, NOT the final answer.
+            # Some thinking models (DeepSeek-R1, QwQ) set content=null and put thinking here.
+            # Try to extract the final answer after a </think> marker; fall back to the last
+            # paragraph only if there is a clear structural break.
+            reasoning_raw = message.get("reasoning_content")
+            if isinstance(reasoning_raw, str) and reasoning_raw.strip():
+                extracted = _strip_think_tags(reasoning_raw.strip())
+                # If stripping produced something shorter, we found a clean answer section.
+                if extracted != reasoning_raw.strip():
+                    return extracted
+                # No </think> delimiter — take the last non-empty paragraph as the answer.
+                paragraphs = [p.strip() for p in re.split(r"\n{2,}", reasoning_raw.strip()) if p.strip()]
+                if paragraphs:
+                    return paragraphs[-1]
 
         # Streaming-like variant: choices[0].delta.content
         delta = choice.get("delta")
